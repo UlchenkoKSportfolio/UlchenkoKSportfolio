@@ -1,0 +1,107 @@
+WITH 
+-- 1. step_первая транзакция для каждого студентa:    
+    first_payments as  (
+       select  user_id
+            ,   date_trunc ('day' , min ( transaction_datetime)) as first_payment_date
+        from    skyeng_db.payments
+        where   status_name = 'success'
+        group by    user_id 
+        order by    1 
+        )   ,
+-- 2. step_уникальные даты (без времени) уроков:
+    all_dates as    (
+        select  distinct date_trunc ('day' , class_start_datetime) as dt
+        from skyeng_db.classes
+        where class_start_datetime between '2016-01-01 00:00' and '2016-12-31 23:59'
+        order by dt
+        )   , 
+-- 3. step_баланс для каждого студент:
+    all_dates_by_user as    (
+        select  user_id
+            ,   dt
+        from first_payments
+            join all_dates
+                on first_payment_date <= dt
+        )   , 
+-- 4. step_сколько уроков было начислено или списано в этот день:    
+    payments_by_dates as    (
+        select  user_id
+            ,   date_trunc ('day' ,  transaction_datetime) as payment_date
+            ,   sum (classes) as transaction_balance_change
+        from skyeng_db.payments
+        where status_name = 'success'
+        group by    user_id ,   payment_date
+        order by 1 , 2
+        )  ,   
+--  5. step_кумулятивная сумма :   
+    payments_by_dates_cumsum as (
+        select  adu.user_id
+            ,   dt
+            ,   coalesce (transaction_balance_change, 0)  as  transaction_balance_change
+            ,   sum (coalesce (transaction_balance_change, 0)) over (partition by adu.user_id order by dt)    as  transaction_balance_change_cs
+        from all_dates_by_user  as  adu 
+            left  join payments_by_dates as  pd 
+                on dt = payment_date 
+                and  adu.user_id=pd.user_id
+        order by dt
+        )   ,  
+-- 6. step_найдем изменения балансов из-за прохождения уроков :
+    classes_by_dates as (
+        select  user_id
+            ,   date_trunc('day' , class_start_datetime) as  class_date
+            ,   count (id_class) * -1  as  classes
+        from skyeng_db.classes
+        where class_type != 'trial'
+            and class_status in ('success', 'failed_by_student')
+        group by 1 , 2 
+        order by 1
+        )   , 
+-- 7. step_ кумулятивная сумма, количества пройденных уроков  :  
+    classes_by_dates_dates_cumsum as    (
+        select  adu.user_id
+            ,   adu.dt
+            ,   coalesce(cd.classes,0) as classes
+            ,   sum (coalesce (classes,0)) over (partition by adu.user_id order by dt)  as  classes_cs 
+        from  all_dates_by_user as adu
+            left join  classes_by_dates as cd
+                on adu.dt = cd.class_date  and  adu.user_id = cd.user_id
+        order by    adu.dt
+        )   ,  
+-- 8. step_баланс каждого студента  :  
+    balances as (
+        select  pd_cm.user_id
+            ,   pd_cm.dt
+            ,   pd_cm.transaction_balance_change
+            ,   pd_cm.transaction_balance_change_cs
+            ,   cd_cm.classes
+            ,   cd_cm.classes_cs
+            ,   classes_cs  +   transaction_balance_change_cs   as  balance
+        from    payments_by_dates_cumsum as pd_cm
+            join   classes_by_dates_dates_cumsum as cd_cm
+                on pd_cm.user_id = cd_cm.user_id and pd_cm.dt = cd_cm.dt
+        )    
+        
+----------------------------------------------------------------------------------------------------------------------
+-- Задание_1
+-- Выберите топ-1000 строк из CTE balances с сортировкой по user_id и dt.Посмотрите на изменения былансов студентов:
+
+-- select *
+-- from balances
+-- order by     user_id ,   dt
+-- limit 1000 
+-----------------------------------------------------------------------------------------------------------------------
+-- 9. step_общее кол-во уроков на балансах студентов:
+select  dt
+    ,   sum(transaction_balance_change)   as sum_transaction_balance_change
+    ,   sum(transaction_balance_change_cs) as sum_transaction_balance_change_cs
+    ,   sum (classes) as  sum_classes
+    ,   sum(classes_cs) as sum_classes_cs
+    ,   sum(balance) as sum_balance
+from balances
+group by dt
+order by dt    
+-----------------------------------------------------------------------------------------------------------------------
+
+-- Задание_2
+-- Создайте визуализацию (линейную диаграмму) итогового результата. 
+-- Какие выводы можно сделать из получившейся визуализации?
